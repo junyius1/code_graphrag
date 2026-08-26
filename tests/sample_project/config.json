@@ -1,0 +1,6 @@
+{
+  "storage_path": "data/users.json",
+  "max_users": 10000,
+  "default_port": 8000,
+  "log_level": "info"
+}

@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+uv.lock
+output/
+*.egg-info/
+# large local reference sources (do not commit)
+3partylibs/
+# test / build artifacts
+tests/tmp_index/
+output/
+index_output/
+*.lance
+__pycache__
