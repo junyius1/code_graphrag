@@ -49,13 +49,38 @@ def _build_index_config(
     max_cluster_size: int | None,
     extra_exclude: list[str] | None,
     verbose: bool,
+    local: bool = False,
+    local_model: str | None = None,
+    local_base_url: str | None = None,
 ) -> IndexConfig:
+    import os
+
     cfg = IndexConfig()
     cfg.discovery.source = source
     cfg.output_dir = output
     cfg.verbose = verbose
     if name:
         cfg.name = name
+    # --local (or LLM_MODEL_ID / LOCAL_LLM_BASE_URL env): target a local
+    # OpenAI-compatible server (vLLM/Ollama); model written as local:/path.
+    local_model = local_model or os.environ.get("LLM_MODEL_ID")
+    local_base_url = local_base_url or os.environ.get("LOCAL_LLM_BASE_URL")
+    if local or local_model or local_base_url:
+        if not local_base_url:
+            typer.echo(
+                "Error: --local requires a base URL: pass --local-base-url or set "
+                "LOCAL_LLM_BASE_URL (e.g. http://localhost:8000/v1)",
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        cfg.llm.provider = LLMProvider.OPENAI_COMPATIBLE
+        cfg.llm.base_url = local_base_url
+        if local_model:
+            cfg.llm.model = (
+                local_model if local_model.startswith("local:") else f"local:{local_model}"
+            )
+        if not cfg.llm.api_key:
+            cfg.llm.api_key = "sk-no-key-offline"
     if llm_provider:
         cfg.llm.provider = LLMProvider(llm_provider.replace("-", "_"))
     if llm_model:
@@ -70,6 +95,14 @@ def _build_index_config(
         cfg.embedding.api_key = emb_api_key
     if emb_base_url:
         cfg.embedding.base_url = emb_base_url
+    elif (
+        cfg.llm.base_url
+        and cfg.llm.provider is LLMProvider.OPENAI_COMPATIBLE
+        and not cfg.embedding.api_key
+    ):
+        # point embeddings at the local server too; the adapter detects a
+        # missing /v1/embeddings and falls back to local hashing
+        cfg.embedding.base_url = cfg.llm.base_url
     if emb_dimensions:
         cfg.embedding.dimensions = emb_dimensions
     if enrich:
@@ -121,6 +154,23 @@ def index(
     emb_dimensions: int | None = typer.Option(
         None, "--emb-dimensions", help="Embedding dimensions."
     ),
+    local: bool = typer.Option(
+        False,
+        "--local",
+        help="Use a local OpenAI-compatible LLM (vLLM/Ollama); reads LLM_MODEL_ID / LOCAL_LLM_BASE_URL env.",
+    ),
+    local_model: str | None = typer.Option(
+        None,
+        "--local-model",
+        envvar="LLM_MODEL_ID",
+        help="Local model id, e.g. local:/mnt/D/models/Qwen3.8-27B (env: LLM_MODEL_ID).",
+    ),
+    local_base_url: str | None = typer.Option(
+        None,
+        "--local-base-url",
+        envvar="LOCAL_LLM_BASE_URL",
+        help="Local server base URL, e.g. http://localhost:8000/v1 (env: LOCAL_LLM_BASE_URL).",
+    ),
     enrich: bool = typer.Option(False, "--enrich", help="Enable optional LLM semantic enrichment."),
     mock: bool = typer.Option(
         False, "--mock", help="Fully offline mock LLM + embeddings (canned summaries)."
@@ -155,9 +205,29 @@ def index(
         max_cluster_size,
         extra_exclude,
         verbose,
+        local=local,
+        local_model=local_model,
+        local_base_url=local_base_url,
     )
     if mock:
         cfg.llm.provider = LLMProvider.MOCK
+    from code_graphrag.graphrag.local_llm import is_local_model, probe_local_server
+
+    if is_local_model(cfg.llm.model) and cfg.llm.base_url:
+        probe = probe_local_server(cfg.llm.base_url, cfg.llm.model)
+        if not probe["reachable"]:
+            typer.echo(
+                f"Error: local LLM server not reachable at {cfg.llm.base_url} - is it running?",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        typer.echo(
+            f"Local LLM: model={cfg.llm.model} base_url={cfg.llm.base_url} "
+            f"server_models={len(probe['models'])} embeddings_endpoint={'yes' if probe['supports_embeddings'] else 'no (local hash fallback)'}",
+            err=True,
+        )
+        if probe["warning"]:
+            typer.echo(probe["warning"], err=True)
     typer.echo(f"Indexing {source} -> {output}")
     if cfg.llm.provider is LLMProvider.MOCK:
         typer.echo("NOTE: LLM provider is 'mock' (fully offline; canned summaries).")
@@ -313,7 +383,17 @@ def query(
         raise typer.Exit(code=1)
     _emit(
         question,
-        type("_R", (), {"answer": res.answer, "entities": [], "relations": [], "path": []})(),
+        type(
+            "_R",
+            (),
+            {
+                "answer": res.answer,
+                "entities": [],
+                "relations": [],
+                "path": [],
+                "reasoning": res.reasoning,
+            },
+        )(),
         json_output,
         source=f"graphrag:{st}",
     )
@@ -385,6 +465,7 @@ def _emit(question: str, result, json_output: bool, source: str) -> None:
                         for e in result.entities
                     ],
                     "path": result.path,
+                    **({"reasoning": result.reasoning} if getattr(result, "reasoning", "") else {}),
                 },
                 indent=2,
                 ensure_ascii=False,

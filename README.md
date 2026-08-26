@@ -68,7 +68,36 @@ code-graphrag index --source ./myrepo --output ./idx \
 
 # Fully offline (mock LLM + mock embeddings):
 code-graphrag index --source ./myrepo --output ./idx --mock
+
+# Local LLM (vLLM / Ollama / any OpenAI-compatible server) + reasoning stream:
+export LLM_MODEL_ID=local:/mnt/D/models/Qwen3.8-27B
+export LOCAL_LLM_BASE_URL=http://localhost:8000/v1
+code-graphrag index --local --source ./myrepo --output ./idx
+# or pass them explicitly:
+code-graphrag index --local --local-model local:/mnt/D/models/Qwen3.8-27B \
+  --local-base-url http://localhost:8000/v1 --source ./myrepo --output ./idx
 ```
+
+### Local LLM (`--local`)
+
+- The model id uses the `local:` prefix: `local:<model-path>` (the id the server
+  advertises, e.g. `local:/mnt/D/models/Qwen3.8-27B`). The prefix is stripped before
+  the request, so it does not have to match any provider convention.
+- `--local` (or just setting `LLM_MODEL_ID` / `LOCAL_LLM_BASE_URL`) sets an
+  `openai_compatible` provider with a placeholder key; no `OPENAI_API_KEY` needed.
+  On `index` the CLI probes `<base>/models` and exits with a clear error if the
+  server is down.
+- **Reasoning models** (vLLM serving Qwen3 / DeepSeek / etc.): indexing keeps the
+  chain-of-thought on (`enable_thinking: true` is sent in the request's
+  `extra_body`). At query time the model's reasoning stream is captured and
+  **printed live (dimmed) to stderr** while the answer appears on stdout; it is also
+  available as `reasoning` in `--json` output and as `SearchResult.reasoning`.
+- **Embeddings:** vLLM does not serve `/v1/embeddings`. The indexer detects this
+  and falls back to a built-in **deterministic local hash embedding** (384-dim by
+  default, `--emb-dimensions N` to override) for GraphRAG's vector store, so the
+  whole pipeline works chat-only. The same fallback is applied automatically at
+  query time. If your server does have embeddings, pass `--emb-model/--emb-base-url`
+  and they are used instead.
 
 Key options (see `code-graphrag index --help` for the full list):
 
@@ -120,6 +149,8 @@ machine-readable output (`question`, `source`, `answer`, `entities[]` with `file
 code-graphrag query -i ./idx -q "How does user registration work end to end?" --mode local
 code-graphrag query -i ./idx -q "What is this repository about?" --mode global
 # drift / basic also supported; --community-level N
+# local-LLM indexes stream the model's reasoning live to stderr (dimmed); the
+# answer goes to stdout, and `--json` includes a `reasoning` field
 ```
 
 Mock-mode indexes answer offline with canned responses (useful for plumbing; a real model

@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from code_graphrag.config.models import IndexConfig
+from code_graphrag.graphrag.local_llm import is_local_model
 from code_graphrag.graphrag.tables import GraphRagTables, build_graphrag_tables
 from code_graphrag.logging_setup import get_logger
 from code_graphrag.semantic.builder import FileContext
@@ -73,8 +74,12 @@ def _completion_model_config(llm: Any) -> dict[str, Any]:
             "model_provider": "mock",
             "mock_responses": [mock.model_dump_json()],
         }
+    from code_graphrag.graphrag.local_llm import is_local_model, normalize_model_id
+
+    model = normalize_model_id(llm.model)
+    local = is_local_model(llm.model)
     cfg: dict[str, Any] = {
-        "model": llm.model,
+        "model": model,
         "model_provider": "openai"
         if str(llm.provider)
         in ("LLMProvider.OPENAI", "LLMProvider.OPENAI_COMPATIBLE", "openai", "openai_compatible")
@@ -89,6 +94,10 @@ def _completion_model_config(llm: Any) -> dict[str, Any]:
     cfg["api_key"] = _resolve_api_key(llm.api_key, provider)
     if llm.base_url:
         cfg["api_base"] = llm.base_url
+    # Local reasoning servers (e.g. vLLM serving Qwen3 with thinking on):
+    # keep the chain-of-thought enabled; the query layer streams it back.
+    if local:
+        cfg["call_args"] = {"extra_body": {"chat_template_kwargs": {"enable_thinking": True}}}
     return cfg
 
 
@@ -111,8 +120,28 @@ def _embedding_model_config(config: IndexConfig) -> dict[str, Any]:
             "model_provider": "mock",
             "mock_responses": [0.1 * (i + 1) for i in range(MOCK_EMBEDDING_DIM)],
         }
+    # Local chat-only servers (vLLM) have no /v1/embeddings: use the built-in
+    # deterministic local hash embedding so the vector store stays consistent
+    # between indexing and query time.
+    from code_graphrag.graphrag.local_llm import is_local_model, register_local_embedding
+
+    if emb.base_url and (
+        is_local_model(emb.model)
+        or is_local_model(config.llm.model)
+        or str(config.llm.provider) in ("LLMProvider.MOCK", "mock")
+        or _local_server_supports_embeddings(emb.base_url) is False
+    ):
+        register_local_embedding()
+        return {
+            "type": "local",
+            "model": emb.model or "local-hash",
+            "model_provider": "local",
+            "dimensions": emb.dimensions or DEFAULT_LOCAL_DIM,
+        }
+    from code_graphrag.graphrag.local_llm import normalize_model_id
+
     cfg: dict[str, Any] = {
-        "model": emb.model,
+        "model": normalize_model_id(emb.model) or emb.model,
         "model_provider": emb.provider or "openai",
         "api_key": _resolve_api_key(emb.api_key, emb.provider or "openai"),
     }
@@ -121,10 +150,37 @@ def _embedding_model_config(config: IndexConfig) -> dict[str, Any]:
     return cfg
 
 
+def _local_server_supports_embeddings(base_url: str) -> bool | None:
+    """Probe <base>/embeddings once; None when it cannot be determined."""
+    from code_graphrag.graphrag.local_llm import probe_local_server
+
+    global _EMB_PROBE
+    if base_url in _EMB_PROBE:
+        return _EMB_PROBE[base_url]
+    probe = probe_local_server(base_url, None)
+    result = probe["supports_embeddings"] if probe["reachable"] else None
+    _EMB_PROBE[base_url] = result
+    if probe["warning"]:
+        logger.warning(probe["warning"])
+    return result
+
+
+_EMB_PROBE: dict[str, bool | None] = {}
+DEFAULT_LOCAL_DIM = 384
+
+
 def _vector_size_for(config: IndexConfig) -> int:
     emb = config.embedding
     if _is_mock_mode(config):
         return MOCK_EMBEDDING_DIM
+    # Local-hash embeddings (chat-only local servers) have a fixed dim; the
+    # vector store size must match what the embedding config emits.
+    if emb.base_url and (
+        is_local_model(emb.model)
+        or is_local_model(config.llm.model)
+        or _local_server_supports_embeddings(emb.base_url) is False
+    ):
+        return emb.dimensions or DEFAULT_LOCAL_DIM
     if emb.dimensions:
         return emb.dimensions
     model = emb.model.lower()

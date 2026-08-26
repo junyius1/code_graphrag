@@ -25,6 +25,7 @@ class SearchResult:
     search_type: str
     context: dict[str, Any] = None
     error: str | None = None
+    reasoning: str = ""
 
 
 def _rekey_model_configs(data: dict[str, Any]) -> None:
@@ -38,7 +39,8 @@ def _rekey_model_configs(data: dict[str, Any]) -> None:
         for mc in (data.get(section) or {}).values():
             if not isinstance(mc, dict):
                 continue
-            if mc.get("type") == "mock":
+            mtype = mc.get("type")
+            if mtype in ("mock", "local"):
                 continue
             if mc.get("api_key"):
                 continue
@@ -59,6 +61,13 @@ def _load_graphrag_config(index_dir: Path) -> Any:
     data.pop("_code_graphrag", None)
     _rekey_model_configs(data)
     config = GraphRagConfig(**data)
+    if any(
+        isinstance(m, dict) and m.get("type") == "local"
+        for m in (data.get("embedding_models") or {}).values()
+    ):
+        from code_graphrag.graphrag.local_llm import register_local_embedding
+
+        register_local_embedding()
     _enable_mock_streaming(config)
     return config
 
@@ -320,14 +329,19 @@ async def agraphrag_search(
         tables = await _load_tables(index_dir)
     except Exception as exc:  # noqa: BLE001
         return SearchResult(answer="", search_type=search_type, error=f"load tables: {exc}")
-    return await _run_search(
-        config,
-        tables,
-        search_type,
-        query,
-        community_level=community_level,
-        response_type=response_type,
-    )
+    from code_graphrag.query.reasoning import capture_reasoning, drain
+
+    with capture_reasoning():
+        result = await _run_search(
+            config,
+            tables,
+            search_type,
+            query,
+            community_level=community_level,
+            response_type=response_type,
+        )
+    result.reasoning = drain()
+    return result
 
 
 def graphrag_search(
