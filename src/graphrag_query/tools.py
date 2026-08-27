@@ -15,9 +15,9 @@ from typing import Any
 
 from langchain_core.tools import tool
 
-from code_graphrag.graphrag_query.context import ContextManager, EvidenceItem
-from code_graphrag.graphrag_query.data_access import QueryData
-from code_graphrag.graphrag_query.trace import Tracer
+from graphrag_query.context import ContextManager, EvidenceItem
+from graphrag_query.data_access import QueryData
+from graphrag_query.trace import Tracer
 
 
 def _result(payload: Any) -> str:

@@ -14,14 +14,14 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 
-from code_graphrag.graphrag_query.agent import (
+from graphrag_query.agent import (
     _tool_signature,
     heuristic_analysis,
     run_query_agent,
 )
-from code_graphrag.graphrag_query.context import ContextManager, EvidenceItem
-from code_graphrag.graphrag_query.data_access import QueryData
-from code_graphrag.graphrag_query.trace import Tracer
+from graphrag_query.context import ContextManager, EvidenceItem
+from graphrag_query.data_access import QueryData
+from graphrag_query.trace import Tracer
 
 # --------------------------------------------------------------------------- #
 # stub model
@@ -356,8 +356,8 @@ def test_agent_context_budget_bounded(built_index):
             "OK",
         ]
     )
-    from code_graphrag.graphrag_query.agent import build_query_graph
-    from code_graphrag.graphrag_query.context import ContextManager
+    from graphrag_query.agent import build_query_graph
+    from graphrag_query.context import ContextManager
 
     d = QueryData.load(built_index)
     ctx = ContextManager(budget_chars=1200)

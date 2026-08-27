@@ -379,7 +379,7 @@ def query(
         import os
 
         from code_graphrag.config.models import LLMConfig, LLMProvider
-        from code_graphrag.graphrag_query import query_repl, run_query_agent
+        from graphrag_query import query_repl, run_query_agent
 
         cfg = LLMConfig()
         local_model = local_model or os.environ.get("LLM_MODEL_ID")

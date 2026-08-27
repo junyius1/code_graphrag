@@ -45,7 +45,7 @@ requires = ["hatchling>=1.27.0,<2.0.0"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/code_graphrag"]
+packages = ["src/code_graphrag", "src/graphrag_query"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

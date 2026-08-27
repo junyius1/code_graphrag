@@ -42,10 +42,10 @@ from langgraph.prebuilt import ToolNode
 from typing_extensions import TypedDict
 
 from code_graphrag.config.models import LLMConfig
-from code_graphrag.graphrag_query.context import ContextManager
-from code_graphrag.graphrag_query.data_access import QueryData
-from code_graphrag.graphrag_query.trace import Tracer
 from code_graphrag.logging_setup import get_logger
+from graphrag_query.context import ContextManager
+from graphrag_query.data_access import QueryData
+from graphrag_query.trace import Tracer
 
 logger = get_logger(__name__)
 
@@ -524,7 +524,7 @@ def _plan_hint(analysis: dict[str, Any]) -> str:
 
 
 def _build_tools_cached(data: QueryData, ctx: ContextManager, tracer: Tracer) -> list[BaseTool]:
-    from code_graphrag.graphrag_query.tools import build_tools
+    from graphrag_query.tools import build_tools
 
     return build_tools(data, ctx, tracer)
 

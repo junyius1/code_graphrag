@@ -11,8 +11,8 @@ import sys
 from typing import Any
 
 from code_graphrag.config.models import LLMConfig
-from code_graphrag.graphrag_query.agent import run_query_agent
 from code_graphrag.logging_setup import get_logger
+from graphrag_query.agent import run_query_agent
 
 logger = get_logger(__name__)
 
