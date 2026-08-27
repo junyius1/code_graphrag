@@ -307,7 +307,47 @@ def inspect(
 @app.command()
 def query(
     index_dir: str = typer.Option(..., "--index", "-i", help="Index directory."),
-    question: str = typer.Option(..., "--question", "-q", help="The question to answer."),
+    question: str | None = typer.Option(
+        None,
+        "--question",
+        "-q",
+        help="The question to answer (omit with --agent for interactive mode).",
+    ),
+    agent: bool = typer.Option(
+        False,
+        "--agent",
+        help="Use the LangGraph Query Agent (tool-calling, multi-round retrieval).",
+    ),
+    llm_provider: str | None = typer.Option(
+        None, "--llm-provider", help="openai|openai_compatible|anthropic|ollama|mock (agent mode)."
+    ),
+    llm_model: str | None = typer.Option(
+        None, "--llm-model", help="Completion model name (agent mode; supports local:/path)."
+    ),
+    llm_api_key: str | None = typer.Option(
+        None, "--llm-api-key", envvar="CODE_GRAPHRAG_LLM_API_KEY", help="LLM API key (or env)."
+    ),
+    llm_base_url: str | None = typer.Option(
+        None, "--llm-base-url", envvar="CODE_GRAPHRAG_LLM_BASE_URL", help="LLM base URL."
+    ),
+    local: bool = typer.Option(
+        False, "--local", help="Local LLM; reads LLM_MODEL_ID / LOCAL_LLM_BASE_URL env."
+    ),
+    local_model: str | None = typer.Option(
+        None, "--local-model", envvar="LLM_MODEL_ID", help="Local model id (env: LLM_MODEL_ID)."
+    ),
+    local_base_url: str | None = typer.Option(
+        None, "--local-base-url", envvar="LOCAL_LLM_BASE_URL", help="Local server base URL."
+    ),
+    max_iterations: int = typer.Option(6, "--max-iterations", help="Max agent retrieval rounds."),
+    mock: bool = typer.Option(
+        False, "--mock", help="Fully offline mock LLM (agent mode, canned answers)."
+    ),
+    interactive: bool = typer.Option(
+        False,
+        "--interactive",
+        help="Interactive query REPL (agent mode; no --question needed).",
+    ),
     mode: str | None = typer.Option(
         None,
         "--mode",
@@ -325,8 +365,96 @@ def query(
     json_output: bool = typer.Option(False, "--json", help="Emit machine-readable JSON."),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose logging."),
 ) -> None:
-    """Answer a question about the indexed source repository."""
+    """Answer a question about the indexed source repository.
+
+    With ``--agent``, a LangGraph Query Agent performs multi-round retrieval
+    (question analysis -> controlled GraphRAG/code-graph tools -> budgeted
+    evidence -> grounded answer). Without ``--question`` (or with
+    ``--interactive``) it starts an interactive REPL.
+    """
     setup_logging("INFO" if not verbose else "DEBUG")
+
+    # ---- agent mode ------------------------------------------------------
+    if agent or interactive:
+        import os
+
+        from code_graphrag.config.models import LLMConfig, LLMProvider
+        from code_graphrag.graphrag_query import query_repl, run_query_agent
+
+        cfg = LLMConfig()
+        local_model = local_model or os.environ.get("LLM_MODEL_ID")
+        local_base_url = local_base_url or os.environ.get("LOCAL_LLM_BASE_URL")
+        if local or local_model or local_base_url:
+            if not local_base_url:
+                typer.echo(
+                    "Error: --local requires --local-base-url or LOCAL_LLM_BASE_URL",
+                    err=True,
+                )
+                raise typer.Exit(code=2)
+            cfg.provider = LLMProvider.OPENAI_COMPATIBLE
+            cfg.base_url = local_base_url
+            if local_model:
+                cfg.model = (
+                    local_model if local_model.startswith("local:") else f"local:{local_model}"
+                )
+            if not cfg.api_key:
+                cfg.api_key = "sk-no-key-offline"
+        if mock:
+            cfg.provider = LLMProvider.MOCK
+        if llm_provider:
+            cfg.provider = LLMProvider(llm_provider.replace("-", "_"))
+        if llm_model:
+            cfg.model = llm_model
+        if llm_api_key:
+            cfg.api_key = llm_api_key
+        if llm_base_url:
+            cfg.base_url = llm_base_url
+
+        if not question:
+            query_repl(index_dir, llm_config=cfg, max_iterations=max_iterations, verbose=verbose)
+            return
+
+        typer.echo(f"[Query Agent] {question}", err=True)
+        res = run_query_agent(
+            index_dir,
+            question,
+            llm_config=cfg,
+            max_iterations=max_iterations,
+            verbose=verbose,
+        )
+        if res.error:
+            typer.echo(f"Query agent failed: {res.error}", err=True)
+            raise typer.Exit(code=1)
+        if json_output:
+            typer.echo(
+                json.dumps(
+                    {
+                        "question": question,
+                        "source": "query_agent",
+                        "answer": res.answer,
+                        "analysis": res.analysis,
+                        "tool_calls": res.tool_calls,
+                        "evidence": res.evidence,
+                        "trace": res.trace,
+                    },
+                    indent=2,
+                    ensure_ascii=False,
+                )
+            )
+        else:
+            typer.echo("")
+            typer.echo(res.answer)
+            typer.echo("")
+            typer.echo(
+                f"(source: query_agent | tools: {len(res.tool_calls)} | evidence: {res.evidence.get('items')})"
+            )
+        return
+
+    if question is None:
+        typer.echo("Error: --question is required (or use --agent/--interactive).", err=True)
+        raise typer.Exit(code=2)
+
+    # ---- classic mode (deterministic routing + GraphRAG search) -----------
     from code_graphrag.query.graphrag_search import graphrag_search
     from code_graphrag.query.queries import CodeGraphQuery
     from code_graphrag.query.routing import (

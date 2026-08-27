@@ -156,6 +156,33 @@ code-graphrag query -i ./idx -q "What is this repository about?" --mode global
 Mock-mode indexes answer offline with canned responses (useful for plumbing; a real model
 answers meaningfully).
 
+### Query Agent (LangGraph, tool-calling)
+
+`--agent` runs a multi-round retrieval agent instead of a single search:
+the LLM classifies the question, calls controlled GraphRAG / code-graph tools
+(as many rounds as needed), gathers deduplicated evidence under a context
+budget, and a final LLM pass writes a grounded answer with `file:line`
+citations.
+
+```bash
+# one-shot (local LLM)
+code-graphrag query --agent --local -i ./idx -q "build_index 是在哪里实现的？"
+# interactive REPL (same flags; no --question)
+code-graphrag query --agent --local -i ./idx
+```
+
+- Tools (LLM picks, no raw SQL): `search_code_symbol`, `search_entity`,
+  `search_relationship`, `callers`, `callees`, `imports_of`, `imported_by`,
+  `inheritance`, `fetch_source_snippets`, `search_source`,
+  `search_documentation`, `local_graph_search`, `global_graph_search`,
+  `code_overview`.
+- `--json` includes `analysis` (question type + extracted symbols), the
+  `tool_calls` trail, `evidence` counts and the full structured `trace`
+  (never the model's hidden chain-of-thought).
+- `--max-iterations N` caps retrieval rounds; repeated identical tool calls
+  are memoized (cheap cached result, no re-execution).
+- `--verbose` prints the trace live to stderr.
+
 ### Inspect & explore
 
 ```bash

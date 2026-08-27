@@ -27,6 +27,7 @@ class _MockChatModel(BaseChatModel):
     """
 
     model_name: str = "mock"
+    _bound_tool_names: list[str] = []
 
     @property
     def _llm_type(self) -> str:
@@ -100,7 +101,14 @@ class _MockChatModel(BaseChatModel):
                     (t for t in tokens if t.lower() not in stop),
                     "handle",
                 )
-            tool_name = "where_is"
+            # pick a tool that exists in the bound set, so the mock works with
+            # both the Deep Agents tools (where_is) and the Query Agent tools
+            # (search_code_symbol)
+            bound = getattr(self, "_bound_tool_names", []) or []
+            tool_name = next(
+                (n for n in ("where_is", "search_code_symbol") if n in bound),
+                "where_is",  # default: Deep Agents toolset (legacy behavior)
+            )
             msg = AIMessage(
                 content="",
                 tool_calls=[
@@ -115,7 +123,13 @@ class _MockChatModel(BaseChatModel):
         return ChatResult(generations=[ChatGeneration(message=msg)])
 
     def bind_tools(self, tools, **kwargs):
-        """No-op: the mock ignores tool schemas and emits its own tool call."""
+        """Record bound tool names so the canned call targets a real tool."""
+        from langchain_core.tools import BaseTool
+
+        names = [t.name for t in tools if isinstance(t, BaseTool)] or [
+            getattr(t, "name", "") for t in tools
+        ]
+        self._bound_tool_names = [n for n in names if n]
         return self
 
     @property
