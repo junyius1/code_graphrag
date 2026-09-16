@@ -193,6 +193,37 @@ code-graphrag explore -i ./idx -s ./myrepo -q "Walk me through the auth flow" \
   --llm-provider openai_compatible --llm-model gpt-4.1-mini
 ```
 
+
+### Code Graph Explorer (Web UI)
+
+A web frontend for browsing the built index: project file tree, interactive
+entity/relation graph (Cytoscape.js), source viewer (Monaco), multi-level call
+chains, and natural-language questions answered by the **existing** LangGraph
+Query Agent (same workflow as `query --agent` — nothing is re-implemented).
+
+The backend is a thin FastAPI service over the built index
+(`code_graphrag/web/`): the adapter reads `code_graphrag_index.json`
+(entities with exact `file:line` spans) + the GraphRAG parquet tables
+(semantic descriptions, text units = real source text) and serves bounded
+subgraphs. It never re-indexes, never loads a model itself, and never
+fabricates data — fields the index doesn't have are reported as absent.
+
+```bash
+export CODE_GRAPHRAG_INDEX_DIR=$PWD/output/open-swe-code-local
+export CODE_GRAPHRAG_SOURCE_ROOT=/path/to/source-repo   # optional: full files + exact slices
+export LOCAL_LLM_BASE_URL=http://localhost:8000/v1      # optional: enables LLM questions
+export LLM_MODEL_ID=<model-id>
+.venv/bin/python -m uvicorn code_graphrag.web.app:app --app-dir src --port 8100
+# → http://127.0.0.1:8100  (serves the built frontend if ../code_browser/dist exists)
+```
+
+Endpoints: `/api/health`, `/api/graph` (bounded subgraph), `/api/file-tree`,
+`/api/entities/{id}` + `/neighbors`, `/api/call-graph/{id}`, `/api/search`,
+`/api/source`, `POST /api/query` (answer + analysis + tool trail + evidence).
+API tests live in `tests/web/` (synthetic index, offline, no LLM). The frontend
+source lives in the `code_browser` repository (React + Vite + Tailwind +
+Cytoscape.js + Monaco); in dev it proxies `/api` to port 8100.
+
 ## 5. Architecture
 
 ```
@@ -432,7 +463,8 @@ nested calls, source spans, bad-code tolerance), stable entity ids, entity/relat
 deduplication, full graph construction (with graph integrity + inheritance chain),
 GraphRAG table structure + config (mock pipeline, `use_lcc=False`, redaction), end-to-end
 mock indexing, deterministic queries + routing, GraphRAG search (local/global/missing),
-LangGraph index & query workflows, the CLI (index/query/inspect), and the Deep Agents
+LangGraph index & query workflows, the CLI (index/query/inspect), the Code Graph
+Explorer web backend (adapter, API, evidence mapping over a synthetic index), and the Deep Agents
 integration (tools + mock tool-calling model).
 
 ## Project layout
@@ -448,6 +480,7 @@ src/code_graphrag/
   workflow/     # index_workflow.py, query_workflow.py (LangGraph)
   llm/          # models.py (LangChain factories), enrichment.py (optional)
   agents/       # code_agent.py (Deep Agents)
+  web/          # FastAPI backend for the Code Graph Explorer (adapter + API)
   cli/          # app.py (Typer: index / query / inspect / explore)
 ```
 
