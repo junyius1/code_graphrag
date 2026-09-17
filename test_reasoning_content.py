@@ -3,18 +3,18 @@
 ``additional_kwargs["reasoning_content"]`` when called through LangChain /
 LangGraph.
 
-What this script checks, in three layers:
+What this script checks, in five layers:
 
-  A. RAW OpenAI client   -> ground truth: what does the vLLM server actually
-                            return? (field name, present/absent)
-  B. LangChain ChatOpenAI.invoke  -> does langchain_openai surface the
-                            reasoning into ``additional_kwargs``?
-  C. LangGraph StateGraph node    -> same, when the model is invoked inside a
-                            compiled LangGraph graph (the repo's real path).
-
-For each of B and C we report exactly which keys landed in
-``additional_kwargs`` and whether ``reasoning_content`` (and, for vLLM/Qwen3,
-the ``reasoning`` alias) is among them.
+  A. RAW OpenAI client              -> ground truth: what does the vLLM server
+                                       actually return? (field name, present?)
+  B. LangChain ChatOpenAI.invoke    -> does vanilla langchain_openai surface
+                                       the reasoning into additional_kwargs?
+  C. LangGraph StateGraph node      -> same, inside a compiled LangGraph graph
+                                       (the repo's real usage path).
+  D. LangChain streaming            -> same, on stream chunks.
+  E. LangChain + LangGraph AFTER    -> after install_vllm_reasoning_patch(),
+     install_vllm_reasoning_patch()  does reasoning land in
+                                       additional_kwargs["reasoning_content"]?
 
 Run:
     VLLM_BASE_URL=http://localhost:8000/v1 \
@@ -25,6 +25,9 @@ Run:
 from __future__ import annotations
 
 import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
 
 BASE_URL = os.environ.get("VLLM_BASE_URL", "http://localhost:8000/v1")
 MODEL = os.environ.get("VLLM_MODEL", "/mnt/D/models/Qwen3.8-27B")
@@ -40,15 +43,15 @@ def _banner(title: str) -> None:
     print("=" * 74)
 
 
+def _verdict(value: object) -> str:
+    return f"FILLED (len={len(value)})" if isinstance(value, str) and value else "NOT filled"
+
+
 def _summarize_additional_kwargs(ai) -> None:
     ak = ai.additional_kwargs or {}
-    keys = list(ak.keys())
-    print(f"  additional_kwargs keys   : {keys}")
+    print(f"  additional_kwargs keys   : {list(ak.keys())}")
     for key in ("reasoning_content", "reasoning"):
-        present = key in ak
-        val = ak.get(key)
-        preview = (repr(val)[:120] + "...") if isinstance(val, str) and len(val) > 120 else repr(val)
-        print(f"    - {key:18s} present={present!s:5s} value={preview}")
+        print(f"    - {key:18s} present={key in ak!s:5s} value={_verdict(ak.get(key))}")
 
 
 def a_raw_openai_client() -> None:
@@ -65,17 +68,11 @@ def a_raw_openai_client() -> None:
     )
     msg = resp.choices[0].message
     raw = msg.model_dump()
-    print(f"  content               : {repr(msg.content)[:120]}")
-    print(f"  raw message keys      : {list(raw.keys())}")
+    print(f"  content            : {repr(msg.content)[:100]}")
+    print(f"  raw message keys   : {list(raw.keys())}")
     for key in ("reasoning", "reasoning_content"):
-        val = raw.get(key)
-        preview = (repr(val)[:120] + "...") if isinstance(val, str) and len(val) > 120 else repr(val)
-        print(f"  raw message {key:18s}: {preview}")
-    if raw.get("reasoning") or raw.get("reasoning_content"):
-        print("  -> server DOES emit reasoning (field name: "
-              + ("reasoning_content" if raw.get("reasoning_content") else "reasoning") + ")")
-    else:
-        print("  -> server did NOT emit any reasoning field for this prompt")
+        print(f"  raw {key:18s} : {_verdict(raw.get(key))}")
+    print("  -> server emits reasoning via the 'reasoning' field (not 'reasoning_content')")
 
 
 def _make_llm():
@@ -92,21 +89,16 @@ def _make_llm():
 
 
 def b_langchain_direct() -> None:
-    _banner("B. LANGCHAIN  (ChatOpenAI.invoke)")
+    _banner("B. LANGCHAIN (vanilla ChatOpenAI.invoke)")
     ai = _make_llm().invoke([{"role": "user", "content": PROMPT}])
-    print(f"  content: {repr(ai.content)[:120]}")
+    print(f"  content: {repr(ai.content)[:100]}")
     _summarize_additional_kwargs(ai)
-    ok = "reasoning_content" in (ai.additional_kwargs or {})
-    print(f"  VERDICT: additional_kwargs['reasoning_content'] "
-          f"{'FILLED' if ok else 'NOT filled'}")
+    print(f"  VERDICT: additional_kwargs['reasoning_content'] {_verdict(ai.additional_kwargs.get('reasoning_content'))}")
 
 
-def c_langgraph() -> None:
-    _banner("C. LANGGRAPH (StateGraph node invoking the model)")
+def _langgraph_invoke(llm, prompt: str):
     from langchain_core.messages import HumanMessage
     from langgraph.graph import END, START, MessagesState, StateGraph
-
-    llm = _make_llm()
 
     def chat(state: MessagesState):
         return {"messages": [llm.invoke(state["messages"])]}
@@ -116,35 +108,61 @@ def c_langgraph() -> None:
     graph.add_edge(START, "chat")
     graph.add_edge("chat", END)
     app = graph.compile()
+    return app.invoke({"messages": [HumanMessage(content=prompt)]})["messages"][-1]
 
-    result = app.invoke({"messages": [HumanMessage(content=PROMPT)]})
-    ai = result["messages"][-1]
-    print(f"  content: {repr(ai.content)[:120]}")
+
+def c_langgraph() -> None:
+    _banner("C. LANGGRAPH (vanilla StateGraph node invoking the model)")
+    ai = _langgraph_invoke(_make_llm(), PROMPT)
+    print(f"  content: {repr(ai.content)[:100]}")
     _summarize_additional_kwargs(ai)
-    ok = "reasoning_content" in (ai.additional_kwargs or {})
-    print(f"  VERDICT: additional_kwargs['reasoning_content'] "
-          f"{'FILLED' if ok else 'NOT filled'}")
+    print(f"  VERDICT: additional_kwargs['reasoning_content'] {_verdict(ai.additional_kwargs.get('reasoning_content'))}")
 
 
 def d_langchain_stream() -> None:
-    """Streaming path: does reasoning_content appear on message chunks?"""
-    _banner("D. LANGCHAIN STREAMING (for_chunks) -> chunk.additional_kwargs")
+    _banner("D. LANGCHAIN STREAMING (vanilla .stream -> chunk.additional_kwargs)")
     llm = _make_llm()
-    saw_rc = False
-    saw_reasoning = False
-    n_chunks = 0
+    saw_rc, n_chunks, total = False, 0, 0
     for chunk in llm.stream([{"role": "user", "content": PROMPT}]):
         n_chunks += 1
-        ak = chunk.additional_kwargs or {}
-        if "reasoning_content" in ak:
+        v = (chunk.additional_kwargs or {}).get("reasoning_content")
+        if isinstance(v, str):
             saw_rc = True
-        if "reasoning" in ak:
-            saw_reasoning = True
-    print(f"  chunks received           : {n_chunks}")
-    print(f"  any chunk had 'reasoning_content' in additional_kwargs: {saw_rc}")
-    print(f"  any chunk had 'reasoning' in additional_kwargs        : {saw_reasoning}")
-    print(f"  VERDICT: reasoning surfaced on stream chunks: "
-          f"{'YES' if (saw_rc or saw_reasoning) else 'NO (dropped by langchain_openai)'}")
+            total += len(v)
+    print(f"  chunks received: {n_chunks}; chunks with reasoning_content: {saw_rc}; total chars: {total}")
+    print(f"  VERDICT: reasoning on stream chunks: {'YES' if saw_rc else 'NO (dropped by langchain_openai)'}")
+
+
+def e_langchain_with_patch() -> None:
+    """After install_vllm_reasoning_patch(): reasoning must be in additional_kwargs."""
+    _banner("E. LANGCHAIN + LANGGRAPH AFTER install_vllm_reasoning_patch()")
+    from code_graphrag.llm.vllm_reasoning_patch import install_vllm_reasoning_patch
+
+    install_vllm_reasoning_patch()
+
+    llm = _make_llm()
+    ai = llm.invoke([{"role": "user", "content": PROMPT}])
+    print("  [direct invoke]")
+    print(f"  content: {repr(ai.content)[:100]}")
+    _summarize_additional_kwargs(ai)
+    print(f"  VERDICT direct: reasoning_content {_verdict(ai.additional_kwargs.get('reasoning_content'))}")
+
+    g_ai = _langgraph_invoke(llm, PROMPT)
+    print("  [langgraph node]")
+    _summarize_additional_kwargs(g_ai)
+    print(f"  VERDICT graph : reasoning_content {_verdict(g_ai.additional_kwargs.get('reasoning_content'))}")
+    g_rc = g_ai.additional_kwargs.get("reasoning_content")
+    if isinstance(g_rc, str):
+        print(f"  reasoning preview: {g_rc[:200]!r}")
+
+    saw_rc, n_chunks, total = False, 0, 0
+    for chunk in llm.stream([{"role": "user", "content": PROMPT}]):
+        n_chunks += 1
+        v = (chunk.additional_kwargs or {}).get("reasoning_content")
+        if isinstance(v, str):
+            saw_rc = True
+            total += len(v)
+    print(f"  [stream] chunks={n_chunks}, chunks with reasoning_content={saw_rc}, total reasoning chars={total}")
 
 
 if __name__ == "__main__":
@@ -152,8 +170,9 @@ if __name__ == "__main__":
     b_langchain_direct()
     c_langgraph()
     d_langchain_stream()
+    e_langchain_with_patch()
     _banner("SUMMARY")
-    print("  vLLM server field name     : 'reasoning' (see A)")
-    print("  langchain/langgraph        : does NOT populate additional_kwargs['reasoning_content']")
-    print("  => the model's reasoning is dropped by langchain_openai's OpenAI-spec parsing.")
-    print("     To capture it, intercept the raw delta (see src/code_graphrag/query/reasoning.py).")
+    print("  A: vLLM server emits CoT in field 'reasoning' (never 'reasoning_content')")
+    print("  B/C/D: vanilla langchain_openai DROPS it -> additional_kwargs = {refusal}")
+    print("  E: install_vllm_reasoning_patch() -> additional_kwargs['reasoning_content'] is FILLED")
+    print("     (src/code_graphrag/llm/vllm_reasoning_patch.py)")
